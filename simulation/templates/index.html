@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Simulador de Incendios Forestales</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f4f4f9; }
+        .container { max-width: 900px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        canvas { border: 2px solid #333; background-color: #000; display: block; margin: 20px auto; cursor: crosshair; }
+        .controls, .weather-box { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .stats { display: flex; justify-content: space-around; background: #eef; padding: 10px; border-radius: 5px; font-weight: bold; }
+        .histogram { margin-top: 20px; padding: 10px; background: #fff3e0; border-left: 5px solid #ff9800; }
+        button { padding: 8px 15px; cursor: pointer; background-color: #4CAF50; color: white; border: none; border-radius: 4px; }
+        button:hover { background-color: #45a049; }
+        input { padding: 5px; border: 1px solid #ccc; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Simulación de Incendios (Drossel-Schwabl)</h1>
+        
+        <!-- Integración Open-Meteo -->
+        <div class="weather-box">
+            <h3>Datos Meteorológicos Reales</h3>
+            <input type="text" id="city" placeholder="Ciudad (ej: Madrid)">
+            <button onclick="getWeather()">Consultar Clima</button>
+            <p id="weatherInfo" style="font-size: 0.9em; color: #555;"></p>
+        </div>
+
+        <!-- Parámetros de Simulación -->
+        <div class="controls">
+            Size: <input type="number" id="size" value="50" min="20" max="200">
+            p: <input type="number" id="p" value="0.05" step="0.01">
+            f: <input type="number" id="f" value="0.001" step="0.001">
+            <button onclick="createSim()" style="background-color: #2196F3;">Crear Nueva Simulación</button>
+        </div>
+
+        <canvas id="fireCanvas"></canvas>
+
+        <div class="stats">
+            <div>Pasos: <span id="stepCount">0</span></div>
+            <div>Densidad: <span id="density">0.00</span>%</div>
+            <button onclick="nextStep()" style="background-color: #ff9800;">Paso a Paso</button>
+            <button id="autoBtn" onclick="toggleAuto()" style="background-color: #f44336;">Auto: OFF</button>
+        </div>
+
+        <div class="histogram">
+            <h4>Distribución de Incendios (Ley de Potencia)</h4>
+            <ul id="fireList" style="column-count: 2;">
+                <li>No hay datos de incendios aún.</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        let simId = null;
+        let autoInterval = null;
+        const canvas = document.getElementById('fireCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Consultar parámetros sugeridos según el clima (RA9)
+        async function getWeather() {
+            const city = document.getElementById('city').value;
+            if(!city) return alert("Escribe una ciudad");
+            
+            const res = await fetch(`/api/weather/?city=${city}`);
+            const data = await res.json();
+            
+            if (data.p) {
+                document.getElementById('p').value = data.p.toFixed(4);
+                document.getElementById('f').value = data.f.toFixed(4);
+                document.getElementById('weatherInfo').innerText = 
+                    `Sugerencia para ${data.city}: Temp ${data.temp}°C. Se han ajustado p y f.`;
+            } else {
+                alert("Error: Ciudad no encontrada.");
+            }
+        }
+
+        // Crear simulación inicial (RA7)
+        async function createSim() {
+            const payload = {
+                size: parseInt(document.getElementById('size').value),
+                p: parseFloat(document.getElementById('p').value),
+                f: parseFloat(document.getElementById('f').value)
+            };
+
+            const res = await fetch('/api/simulations/', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+            
+            const data = await res.json();
+            if (res.ok) {
+                simId = data.id;
+                resetUI();
+                drawGrid(data.grid);
+                alert("Simulación creada en el servidor.");
+            } else {
+                alert("Error: " + JSON.stringify(data));
+            }
+        }
+
+        // Avanzar la simulación (RA7)
+        async function nextStep() {
+            if (!simId) return alert("Crea primero una simulación");
+            
+            const res = await fetch(`/api/simulations/${simId}/step/`, { 
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ steps: 1 })
+            });
+            
+            const data = await res.json();
+            drawGrid(data.grid);
+            document.getElementById('stepCount').innerText = data.steps_count;
+            document.getElementById('density').innerText = (data.tree_density * 100).toFixed(2);
+            updateHistogram(data.fire_size_history);
+        }
+
+        function drawGrid(grid) {
+            const size = grid.length;
+            const displaySize = 600;
+            const cellSize = displaySize / size;
+            canvas.width = displaySize;
+            canvas.height = displaySize;
+
+            for (let r = 0; r < size; r++) {
+                for (let c = 0; c < size; c++) {
+                    let color = 'black'; // Vacío (0)
+                    if (grid[r][c] === 1) color = '#2e7d32'; // Árbol (1) - Verde
+                    else if (grid[r][c] === 2) color = '#ff5722'; // Fuego (2) - Naranja
+                    
+                    ctx.fillStyle = color;
+                    ctx.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+                }
+            }
+        }
+
+        function updateHistogram(history) {
+            const list = document.getElementById('fireList');
+            list.innerHTML = "";
+            const entries = Object.entries(history).sort((a, b) => parseInt(b[0]) - parseInt(a[0]));
+            
+            if (entries.length === 0) {
+                list.innerHTML = "<li>Esperando primer incendio...</li>";
+                return;
+            }
+
+            entries.slice(0, 10).forEach(([size, count]) => {
+                const li = document.createElement('li');
+                li.innerHTML = `Tamaño <b>${size}</b>: ${count} veces`;
+                list.appendChild(li);
+            });
+        }
+
+        function toggleAuto() {
+            const btn = document.getElementById('autoBtn');
+            if (autoInterval) {
+                clearInterval(autoInterval);
+                autoInterval = null;
+                btn.innerText = "Auto: OFF";
+            } else {
+                autoInterval = setInterval(nextStep, 100);
+                btn.innerText = "Auto: ON";
+            }
+        }
+
+        function resetUI() {
+            document.getElementById('stepCount').innerText = "0";
+            document.getElementById('density').innerText = "0.00";
+            document.getElementById('fireList').innerHTML = "<li>Esperando datos...</li>";
+            if(autoInterval) toggleAuto();
+        }
+    </script>
+</body>
+</html>
